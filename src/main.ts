@@ -22,6 +22,12 @@ import {
   runAgyStatusLineHook,
   uninstallAntigravityStatusLineHook,
 } from './antigravity-statusline.js'
+import {
+  installClaudeStatusLineHook,
+  uninstallClaudeStatusLineHook,
+  runClaudeStatusLineHook,
+  refreshClaudeAggregate,
+} from './claude-statusline.js'
 import { clearPlan, readConfig, readPlan, readPlans, saveConfig, savePlan, getConfigFilePath, type Plan, type PlanId, type PlanProvider } from './config.js'
 import { clampResetDay, getPlanUsageOrNull, getPlanUsages, type PlanUsage } from './plan-usage.js'
 import { getPresetPlan, isPlanId, isPlanProvider, PLAN_IDS, PLAN_PROVIDERS, planDisplayName } from './plans.js'
@@ -1276,6 +1282,52 @@ program
   .description('Internal Antigravity CLI statusLine hook')
   .action(async () => {
     await runAgyStatusLineHook()
+  })
+
+program
+  .command('claude-statusline')
+  .description('Install or remove the Claude Code statusline (renders codeburn stats + captures rate-limit / effort telemetry)')
+  .argument('<action>', 'install or uninstall')
+  .option('--force', 'Replace an existing custom Claude Code statusLine command')
+  .action(async (action: string, opts: { force?: boolean }) => {
+    try {
+      if (action === 'install') {
+        const result = await installClaudeStatusLineHook(!!opts.force)
+        console.log(result === 'already-installed'
+          ? '\n  Claude Code statusline is already installed.\n'
+          : '\n  Claude Code statusline installed.\n')
+        return
+      }
+      if (action === 'uninstall') {
+        const result = await uninstallClaudeStatusLineHook()
+        console.log(result === 'not-installed'
+          ? '\n  Claude Code statusline is not installed.\n'
+          : result === 'restored'
+            ? '\n  Claude Code statusline removed; previous statusLine restored.\n'
+          : '\n  Claude Code statusline removed.\n')
+        return
+      }
+      console.error('\n  Usage: codeburn claude-statusline <install|uninstall>\n')
+      process.exit(1)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error(`\n  Claude statusline failed: ${message}\n`)
+      process.exit(1)
+    }
+  })
+
+program
+  .command('claude-statusline-hook', { hidden: true })
+  .description('Internal Claude Code statusLine renderer + telemetry capture')
+  .action(async () => {
+    await runClaudeStatusLineHook()
+  })
+
+program
+  .command('claude-statusline-refresh', { hidden: true })
+  .description('Internal: recompute the cross-session statusline aggregate')
+  .action(async () => {
+    await refreshClaudeAggregate()
   })
 
 program.parse()

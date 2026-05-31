@@ -10,6 +10,7 @@ import { parseJsonlLine, shouldSkipLine } from './parser.js'
 import type { DateRange, ProjectSummary } from './types.js'
 import { formatCost } from './currency.js'
 import { formatTokens } from './format.js'
+import { loadPluginMcpServers, reconcileConfiguredToPlugin } from './plugins.js'
 
 // ============================================================================
 // Display constants
@@ -1401,6 +1402,7 @@ export function detectUnusedMcp(
   projects: ProjectSummary[],
   projectCwds: Set<string>,
   mcpCoverage = aggregateMcpCoverage(projects),
+  pluginServers = loadPluginMcpServers(),
 ): WasteFinding | null {
   const configured = loadMcpConfigs(projectCwds)
   if (configured.size === 0) return null
@@ -1434,11 +1436,19 @@ export function detectUnusedMcp(
   )
 
   const now = Date.now()
+  const seenIds = new Set<string>()
   const unused: string[] = []
   for (const entry of configured.values()) {
-    if (calledServers.has(entry.normalized)) continue
-    if (coverageReportedServers.has(entry.normalized)) continue
+    // Collapse a config entry that denotes a plugin-provided server onto that
+    // server's runtime identity (`plugin_<name>_<server>`), so it is judged by
+    // real runtime usage instead of a bare config name that can never match a
+    // runtime tool call. Non-plugin configs keep their own name.
+    const id = reconcileConfiguredToPlugin(entry.normalized, pluginServers) ?? entry.normalized
+    if (calledServers.has(id)) continue
+    if (coverageReportedServers.has(id)) continue
     if (entry.mtime > 0 && now - entry.mtime < MCP_NEW_CONFIG_GRACE_MS) continue
+    if (seenIds.has(id)) continue
+    seenIds.add(id)
     unused.push(entry.original)
   }
 

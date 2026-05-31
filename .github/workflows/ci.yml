@@ -25,3 +25,28 @@ jobs:
             jq -r '.results[] | "::error file=\(.path),line=\(.start.line)::\(.extra.message)"' semgrep-out.json
             exit 1
           fi
+
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      # The CLI integration tests spawn `tsx src/cli.ts` per case, a cold
+      # transpile that can exceed the 10s default per-test timeout under load;
+      # 30s of headroom + a retry absorb the spawn-time variance.
+      - name: Test
+        run: npx vitest run --testTimeout=30000 --retry=2

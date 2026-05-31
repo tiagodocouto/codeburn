@@ -3,12 +3,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-import { detectUnusedMcp } from '../src/optimize.js'
+import { detectUnusedMcp, detectDuplicatePluginMcp } from '../src/optimize.js'
 import type { ToolCall, McpServerCoverage } from '../src/optimize.js'
 import type { ProjectSummary } from '../src/types.js'
 import {
   loadPluginMcpServers,
   reconcileConfiguredToPlugin,
+  matchConfiguredToPlugin,
   canonicalServerName,
   type PluginMcpServer,
 } from '../src/plugins.js'
@@ -205,5 +206,103 @@ describe('detectUnusedMcp with plugin awareness', () => {
     expect(finding).not.toBeNull()
     expect(finding!.explanation).toContain('OPERA')
     expect(finding!.explanation).toContain('NEON')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// matchConfiguredToPlugin — returns the matched plugin server object
+// ---------------------------------------------------------------------------
+
+describe('matchConfiguredToPlugin', () => {
+  const servers: PluginMcpServer[] = [
+    { runtimeId: 'plugin_nott_PEER', pluginName: 'nott', serverKey: 'PEER' },
+    { runtimeId: 'plugin_nott_SSOT', pluginName: 'nott', serverKey: 'SSOT' },
+  ]
+
+  it('returns the full plugin server across bare / qualified / alias spellings', () => {
+    expect(matchConfiguredToPlugin('SSOT', servers)).toMatchObject({ pluginName: 'nott', serverKey: 'SSOT' })
+    expect(matchConfiguredToPlugin('nottSSOT', servers)?.runtimeId).toBe('plugin_nott_SSOT')
+    expect(matchConfiguredToPlugin('nott-peer', servers)?.runtimeId).toBe('plugin_nott_PEER')
+  })
+
+  it('returns null for a server no plugin provides', () => {
+    expect(matchConfiguredToPlugin('OPERA', servers)).toBeNull()
+    expect(matchConfiguredToPlugin('', servers)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// detectDuplicatePluginMcp — standalone config that duplicates a plugin server
+// ---------------------------------------------------------------------------
+
+describe('detectDuplicatePluginMcp', () => {
+  function cwdWithMcpJson(servers: string[]): string {
+    const dir = freshDir()
+    const mcpServers: Record<string, unknown> = {}
+    for (const s of servers) mcpServers[s] = { command: 'noop' }
+    writeFileSync(join(dir, '.mcp.json'), JSON.stringify({ mcpServers }))
+    return dir
+  }
+
+  const projects = [
+    { project: 'p', projectPath: '/p', sessions: [{ mcpBreakdown: {} }], totalCostUSD: 0, totalApiCalls: 0 },
+  ] as unknown as ProjectSummary[]
+
+  const pluginServers: PluginMcpServer[] = [
+    { runtimeId: 'plugin_nott_SSOT', pluginName: 'nott', serverKey: 'SSOT' },
+    { runtimeId: 'plugin_nott_PEER', pluginName: 'nott', serverKey: 'PEER' },
+    { runtimeId: 'plugin_nott_stitch', pluginName: 'nott', serverKey: 'stitch' },
+  ]
+
+  it('flags a standalone .mcp.json entry an installed plugin already provides', () => {
+    const cwd = cwdWithMcpJson(['STITCH', 'OPERA'])
+    const finding = detectDuplicatePluginMcp(projects, new Set([cwd]), pluginServers)
+    expect(finding).not.toBeNull()
+    // STITCH → plugin_nott_stitch → redundant, named with its plugin.
+    expect(finding!.explanation).toContain('STITCH')
+    expect(finding!.explanation).toContain('plugin nott')
+    // OPERA has no plugin equivalent → not a duplicate.
+    expect(finding!.explanation).not.toContain('OPERA')
+  })
+
+  it('flags a vendor-prefixed alias that resolves to a plugin server', () => {
+    const cwd = cwdWithMcpJson(['nott-peer'])
+    const finding = detectDuplicatePluginMcp(projects, new Set([cwd]), pluginServers)
+    expect(finding?.explanation ?? '').toContain('nott-peer')
+  })
+
+  it('returns null when no standalone config duplicates a plugin server', () => {
+    const cwd = cwdWithMcpJson(['OPERA', 'NEON'])
+    expect(detectDuplicatePluginMcp(projects, new Set([cwd]), pluginServers)).toBeNull()
+  })
+
+  it('returns null when no plugins are installed', () => {
+    const cwd = cwdWithMcpJson(['SSOT'])
+    expect(detectDuplicatePluginMcp(projects, new Set([cwd]), [])).toBeNull()
+  })
+
+  it('flags every standalone key that resolves to a plugin server, without deduping by target', () => {
+    // Both `PEER` and the `nott-peer` alias map to plugin_nott_PEER — two
+    // separate redundant registrations, so both must be reported for removal.
+    const cwd = cwdWithMcpJson(['PEER', 'nott-peer'])
+    const finding = detectDuplicatePluginMcp(projects, new Set([cwd]), pluginServers)
+    expect(finding).not.toBeNull()
+    expect(finding!.title.startsWith('2 standalone MCP configs')).toBe(true)
+    const fix = finding!.fix
+    if (fix.type === 'paste') {
+      expect(fix.text).toContain('PEER')
+      expect(fix.text).toContain('nott-peer')
+    }
+  })
+
+  it('emits a prompt-destination paste fix that names only the standalone duplicates', () => {
+    const cwd = cwdWithMcpJson(['SSOT', 'OPERA'])
+    const finding = detectDuplicatePluginMcp(projects, new Set([cwd]), pluginServers)
+    const fix = finding!.fix
+    expect(fix).toMatchObject({ type: 'paste', destination: 'prompt' })
+    if (fix.type === 'paste') {
+      expect(fix.text).toContain('SSOT')
+      expect(fix.text).not.toContain('OPERA')
+    }
   })
 })

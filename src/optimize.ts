@@ -10,7 +10,7 @@ import { parseJsonlLine, shouldSkipLine } from './parser.js'
 import type { DateRange, ProjectSummary } from './types.js'
 import { formatCost } from './currency.js'
 import { formatTokens } from './format.js'
-import { loadPluginMcpServers, reconcileConfiguredToPlugin } from './plugins.js'
+import { loadPluginMcpServers, matchConfiguredToPlugin, reconcileConfiguredToPlugin } from './plugins.js'
 
 // ============================================================================
 // Display constants
@@ -1471,6 +1471,51 @@ export function detectUnusedMcp(
   }
 }
 
+export function detectDuplicatePluginMcp(
+  projects: ProjectSummary[],
+  projectCwds: Set<string>,
+  pluginServers = loadPluginMcpServers(),
+): WasteFinding | null {
+  if (pluginServers.length === 0) return null
+  const configured = loadMcpConfigs(projectCwds)
+  if (configured.size === 0) return null
+
+  // A standalone .mcp.json / settings.json entry whose name resolves to a
+  // server an installed plugin also provides is a redundant registration: the
+  // plugin and the hand-rolled config register under different runtime names
+  // (`plugin_<name>_<server>` vs the bare key), so Claude Code spawns the
+  // server twice — two processes, two copies of the tool schema, two
+  // definitions free to drift. Distinct from detectUnusedMcp: a duplicate is
+  // redundant whether or not it is used. Every matching key is reported, not
+  // deduped by target — two standalone aliases for the same plugin server are
+  // two separate redundant registrations and both must be removed.
+  const dupes: { original: string; pluginName: string }[] = []
+  for (const entry of configured.values()) {
+    const match = matchConfiguredToPlugin(entry.normalized, pluginServers)
+    if (!match) continue
+    dupes.push({ original: entry.original, pluginName: match.pluginName })
+  }
+  if (dupes.length === 0) return null
+
+  const totalSessions = projects.reduce((s, p) => s + p.sessions.length, 0)
+  const schemaTokensPerSession = dupes.length * TOOLS_PER_MCP_SERVER * TOKENS_PER_MCP_TOOL
+  const tokensSaved = schemaTokensPerSession * Math.max(totalSessions, 1)
+  const list = dupes.map(d => `${d.original} (plugin ${d.pluginName})`).join(', ')
+
+  return {
+    title: `${dupes.length} standalone MCP config${dupes.length > 1 ? 's' : ''} duplicating a plugin-provided server`,
+    explanation: `These standalone entries share a name with a server an installed plugin already provides, so each is loaded a second time under a different runtime name and the two definitions can drift: ${list}. Verify each is the same server, then remove the standalone entry and keep the plugin manifest as the single source of truth.`,
+    impact: dupes.length >= UNUSED_MCP_HIGH_THRESHOLD ? 'high' : 'medium',
+    tokensSaved,
+    fix: {
+      type: 'paste',
+      destination: 'prompt',
+      label: `Remove the redundant standalone MCP config${dupes.length > 1 ? 's' : ''}:`,
+      text: `These entries in this project's .mcp.json / settings.json share a name with a server an installed Claude Code plugin already provides, so each standalone entry spawns a duplicate: ${dupes.map(d => d.original).join(', ')}. Verify each is the same server the plugin ships, then remove the standalone duplicate and keep the plugin as the single source of truth.`,
+    },
+  }
+}
+
 function expandImports(filePath: string, seen: Set<string>, depth: number): { totalLines: number; importedFiles: number } {
   if (depth > MAX_IMPORT_DEPTH || seen.has(filePath)) return { totalLines: 0, importedFiles: 0 }
   seen.add(filePath)
@@ -2292,6 +2337,7 @@ export async function scanAndDetect(
   const costRate = computeInputCostRate(projects)
   const { toolCalls, projectCwds, apiCalls, userMessages } = await scanSessions(dateRange)
   const mcpCoverage = aggregateMcpCoverage(projects)
+  const pluginServers = loadPluginMcpServers()
 
   const findings: WasteFinding[] = []
   // Priority order for the per-session findings: low-worth → context-bloat →
@@ -2309,7 +2355,8 @@ export async function scanAndDetect(
     () => detectLowReadEditRatio(toolCalls),
     () => detectJunkReads(toolCalls, dateRange),
     () => detectDuplicateReads(toolCalls, dateRange),
-    () => detectUnusedMcp(toolCalls, projects, projectCwds, mcpCoverage),
+    () => detectUnusedMcp(toolCalls, projects, projectCwds, mcpCoverage, pluginServers),
+    () => detectDuplicatePluginMcp(projects, projectCwds, pluginServers),
     () => detectMcpToolCoverage(projects, mcpCoverage),
     () => detectMcpProfileAdvisor(projects, mcpCoverage),
     () => detectCapabilityReliability(projects),

@@ -118,26 +118,36 @@ export function canonicalServerName(name: string): string {
 }
 
 /**
- * Reconcile a configured (config-file) server name to a plugin-provided server,
- * returning the plugin server's `runtimeId` when they denote the same server,
- * else null. Covers the three real-world spellings of the same server:
- *   - bare server key:      `SSOT`      ↔ plugin nott/SSOT
- *   - plugin-qualified:     `nottSSOT`  ↔ plugin nott/SSOT
+ * Match a configured (config-file) server name to the plugin-provided server
+ * that denotes the same server, or null. Covers the three real-world spellings:
+ *   - bare server key:       `SSOT`      ↔ plugin nott/SSOT
+ *   - plugin-qualified:      `nottSSOT`  ↔ plugin nott/SSOT
  *   - vendor-prefixed alias: `nott-peer` ↔ plugin nott/PEER
  *     (canonical starts with the plugin name and ends with the server key)
  */
-export function reconcileConfiguredToPlugin(
+export function matchConfiguredToPlugin(
   configuredName: string,
   pluginServers: PluginMcpServer[],
-): string | null {
+): PluginMcpServer | null {
   const c = canonicalServerName(configuredName)
   if (!c) return null
   for (const p of pluginServers) {
     const key = canonicalServerName(p.serverKey)
     if (!key) continue
-    if (c === key || c === canonicalServerName(p.pluginName) + key) return p.runtimeId
+    if (c === key || c === canonicalServerName(p.pluginName) + key) return p
     const pn = canonicalServerName(p.pluginName)
-    if (pn && c.startsWith(pn) && c.endsWith(key)) return p.runtimeId
+    if (pn && c.startsWith(pn) && c.endsWith(key)) return p
   }
   return null
+}
+
+/**
+ * Reconcile a configured server name to a plugin server's `runtimeId` when they
+ * denote the same server, else null. Thin wrapper over `matchConfiguredToPlugin`.
+ */
+export function reconcileConfiguredToPlugin(
+  configuredName: string,
+  pluginServers: PluginMcpServer[],
+): string | null {
+  return matchConfiguredToPlugin(configuredName, pluginServers)?.runtimeId ?? null
 }
